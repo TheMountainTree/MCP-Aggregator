@@ -143,7 +143,7 @@ mcp_servers:
     url: http://127.0.0.1:3300/sse
 ```
 
-*(如需单独调用分立服务，可配置 URL 为 `http://127.0.0.1:3300/ms365/sse`)*
+*(如需单独调用分立服务，可配置 URL 为 `http://127.0.0.1:3300/ms365/sse`，详见下文第 4 节)*
 
 ### 2. Claude CLI / Claude Desktop (`claude_desktop_config.json` 或 `.claude.json`)
 
@@ -164,6 +164,54 @@ mcp_servers:
 ```text
 http://127.0.0.1:3300/sse
 ```
+
+### 4. 单独接入某个分立服务 (Per-Service Endpoint)
+
+如果不希望某个客户端接入全量工具，网关为每个后端服务都保留了分立端点 `http://127.0.0.1:3300/:service/sse`，无需改动任何代码，直接将客户端的 URL 指向对应服务即可。例如只接入 ms365：
+
+```json
+{
+  "mcpServers": {
+    "ms365": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3300/ms365/sse"
+    }
+  }
+}
+```
+
+分立端点与统一聚合端点共享同一套 Scale-to-Zero 机制：
+
+- 客户端只会枚举到该服务自身的工具，互不干扰；
+- `tools/list` 依然命中本地 Schema 缓存（< 1ms），调用时按需唤醒；
+- 多个客户端分别连接不同端点时，共享同一个后端单例进程，不会重复拉起。
+
+#### 进阶：将某个服务从统一聚合端点中摘除
+
+若希望某个服务仅供专用客户端调用、不出现在统一端点的工具列表中，可在 `config.json` 中为该服务添加 `"enabled": false`：
+
+```json
+"brave-search": {
+  "name": "brave-search",
+  "enabled": false,
+  "command": "node",
+  "args": [
+    "--use-env-proxy",
+    "./node_modules/@brave/brave-search-mcp-server/dist/index.js"
+  ],
+  "env": {
+    "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+    "HTTP_PROXY": "http://127.0.0.1:7890",
+    "HTTPS_PROXY": "http://127.0.0.1:7890",
+    "NODE_USE_ENV_PROXY": "1"
+  },
+  "idleTimeoutMinutes": 15
+}
+```
+
+被摘除的服务将从统一端点 `http://127.0.0.1:3300/sse` 的 `tools/list` 与工具路由中隐藏，但其分立端点 `http://127.0.0.1:3300/brave-search/sse` 仍然可用，适合「部分工具仅授权给指定 Agent」的场景。
+
+> **提示**：统一端点按「工具名」在所有已启用的服务间智能路由，若多个服务存在同名工具，将命中配置顺序靠前的服务；分立端点则只暴露各自的工具，不存在歧义。
 
 ---
 
