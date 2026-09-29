@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Local sensitive configuration & environment secrets
+config.json
+.env
+.env.local
+.env.*.local
+
+# Schema cache & dynamic files
+cache/
+*.log
+
+# Operating System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo

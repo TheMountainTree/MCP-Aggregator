@@ -1,0 +1,32 @@
+{
+  "port": 3300,
+  "defaultIdleTimeoutMinutes": 60,
+  "services": {
+    "ms365": {
+      "name": "ms365",
+      "command": "node",
+      "args": [
+        "./node_modules/@softeria/ms-365-mcp-server/dist/index.js",
+        "--preset",
+        "calendar"
+      ],
+      "env": {},
+      "idleTimeoutMinutes": 60
+    },
+    "brave-search": {
+      "name": "brave-search",
+      "command": "node",
+      "args": [
+        "--use-env-proxy",
+        "./node_modules/@brave/brave-search-mcp-server/dist/index.js"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}",
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890",
+        "NODE_USE_ENV_PROXY": "1"
+      },
+      "idleTimeoutMinutes": 15
+    }
+  }
+}

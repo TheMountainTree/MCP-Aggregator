@@ -1,0 +1,31 @@
+{
+  "name": "mcp-aggregator",
+  "version": "1.0.0",
+  "description": "High-performance Scale-to-Zero MCP Aggregation Gateway for Windows & macOS. Seamlessly aggregate multiple MCP servers into a unified SSE endpoint with on-demand process waking and auto-shutdown.",
+  "main": "gateway.js",
+  "type": "module",
+  "scripts": {
+    "start": "node gateway.js",
+    "daemon": "wscript start-daemon.vbs"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "scale-to-zero",
+    "mcp-gateway",
+    "mcp-aggregator",
+    "ai-agent",
+    "hermes",
+    "claude",
+    "sse"
+  ],
+  "author": "TheMountainTree",
+  "license": "MIT",
+  "dependencies": {
+    "@brave/brave-search-mcp-server": "^2.1.4",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@softeria/ms-365-mcp-server": "^0.156.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
+  }
+}
