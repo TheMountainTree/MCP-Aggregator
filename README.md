@@ -30,6 +30,7 @@
 
 5. **插件化自由装载 (Pluggable Backends)**：
    - 支持通过声明式配置载入任意运行时：Node.js、Python (`uv run`)、本地可执行二进制，支持环境变量动态插值（`${ENV_VAR}`）。
+   - npm 服务**只需声明包名**：网关启动时自动补装缺失依赖，并从包的 `bin` / `main` 字段自动解析真实入口，无需手动查找路径。
 
 ---
 
@@ -77,7 +78,7 @@ npm install
 cp config.example.json config.json
 ```
 
-根据您的需求修改 `config.json`（支持环境变量动态插值 `${VAR_NAME}`）：
+根据您的需求修改 `config.json`（支持环境变量动态插值 `${VAR_NAME}`）。**npm 服务只需声明包名**，网关会自动完成安装与入口解析：
 
 ```json
 {
@@ -85,23 +86,14 @@ cp config.example.json config.json
   "defaultIdleTimeoutMinutes": 60,
   "services": {
     "ms365": {
-      "name": "ms365",
-      "command": "node",
-      "args": [
-        "./node_modules/@softeria/ms-365-mcp-server/dist/index.js",
-        "--preset",
-        "calendar"
-      ],
+      "package": "@softeria/ms-365-mcp-server",
+      "args": ["--preset", "calendar"],
       "env": {},
       "idleTimeoutMinutes": 60
     },
     "brave-search": {
-      "name": "brave-search",
-      "command": "node",
-      "args": [
-        "--use-env-proxy",
-        "./node_modules/@brave/brave-search-mcp-server/dist/index.js"
-      ],
+      "package": "@brave/brave-search-mcp-server",
+      "args": [],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}",
         "HTTP_PROXY": "http://127.0.0.1:7890",
@@ -241,6 +233,7 @@ http://127.0.0.1:3300/sse
       "remainingIdleSeconds": null,
       "toolsCount": 42,
       "stats": { "totalCalls": 4, "wakeups": 1 },
+      "error": null,
       "sseUrl": "http://127.0.0.1:3300/ms365/sse"
     }
   }
@@ -251,11 +244,32 @@ http://127.0.0.1:3300/sse
 
 ## 🛠️ 扩展新服务 (Extending Backends)
 
-支持通过简单的 JSON 声明挂载任意新服务。例如挂载一个 Python 编写的 MCP 服务：
+### 方式一：npm 包模式（推荐）
+
+只需声明包名，网关在启动时会自动补装缺失的依赖（`npm install --no-save`），并从包的 `bin` / `main` 字段解析真实入口，以 node 直连方式拉起常驻进程：
+
+```json
+"my-npm-service": {
+  "package": "@scope/some-mcp-server",
+  "args": ["--some-flag"],
+  "env": {
+    "CUSTOM_ENV": "1"
+  },
+  "idleTimeoutMinutes": 30
+}
+```
+
+说明：
+
+- 支持版本锁定：`"package": "@scope/some-mcp-server@1.2.3"`；
+- 若包存在多个 `bin` 入口，需通过 `"binName": "xxx"` 显式指定；
+- 自动安装为一次性短命令（默认超时 300 秒，可通过 `"installTimeoutMs"` 调整），常驻服务进程依然不走 `npx` / `cmd.exe` 垫片；
+- 依赖包缺失导致安装失败时，该服务会在仪表盘标记 `error`，不影响网关与其他服务的运行。
+
+### 方式二：显式命令模式（Python / 本地二进制等任意运行时）
 
 ```json
 "my-python-service": {
-  "name": "my-python-service",
   "command": "uv",
   "args": ["run", "my_mcp_server.py"],
   "env": {
@@ -264,6 +278,8 @@ http://127.0.0.1:3300/sse
   "idleTimeoutMinutes": 30
 }
 ```
+
+两种模式均支持环境变量插值（`${ENV_VAR}`）；`args` 中以 `./` 开头的路径会自动解析为网关项目根目录下的绝对路径。注意：`args` 中的参数会传给 MCP 服务本身；若需向 Node 运行时传递开关（如 Node 24+ 的 `--use-env-proxy`），请改用对应的环境变量（如 `NODE_USE_ENV_PROXY=1`）。
 
 ---
 

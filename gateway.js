@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -32,6 +33,112 @@ function resolveEnvMap(envObj) {
   return res;
 }
 
+// ── npm 包自动安装与入口解析 ──────────────────────────────────────────────
+// 服务配置中声明 "package": "name[@version]" 即可，网关在启动时自动补装缺失
+// 依赖，并从包的 bin / main 字段解析真实入口。常驻进程仍以 node 直连入口
+// 文件的方式拉起，不走 npx / cmd.exe 垫片（防僵尸进程承诺不变）。
+
+// 解析 npm 包 spec："@scope/name@1.2.3" / "@scope/name" / "name@1.2.3" / "name"
+function parsePackageSpec(spec) {
+  const s = String(spec).trim();
+  if (s.startsWith('@')) {
+    const slash = s.indexOf('/');
+    if (slash === -1) throw new Error(`无效的 npm 包名: ${s}`);
+    const at = s.indexOf('@', slash + 1);
+    return at === -1
+      ? { name: s, version: '' }
+      : { name: s.slice(0, at), version: s.slice(at + 1) };
+  }
+  const at = s.indexOf('@', 1);
+  return at === -1
+    ? { name: s, version: '' }
+    : { name: s.slice(0, at), version: s.slice(at + 1) };
+}
+
+// 定位随 Node 一起安装的 npm-cli.js（避免经 cmd.exe 调用 npm 垫片）
+function getNpmCliPath() {
+  const candidate = path.join(
+    path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'
+  );
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+// 一次性执行 npm install（短命令、同步等待结束，不产生常驻进程）
+function runNpmInstall(spec, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const npmCli = getNpmCliPath();
+    const child = npmCli
+      ? spawn(
+          process.execPath,
+          [npmCli, 'install', spec, '--no-save', '--no-audit', '--no-fund', '--loglevel', 'error'],
+          { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] }
+        )
+      : spawn(
+          `npm install ${spec} --no-save --no-audit --no-fund --loglevel error`,
+          { cwd: __dirname, shell: true, stdio: ['ignore', 'pipe', 'pipe'] }
+        );
+
+    let output = '';
+    child.stdout.on('data', (d) => { output += d; });
+    child.stderr.on('data', (d) => { output += d; });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`npm install ${spec} 超时（${Math.round(timeoutMs / 1000)}s），请检查网络或调大 installTimeoutMs`));
+    }, timeoutMs);
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`npm install ${spec} 失败 (exit ${code}):\n${output.slice(-2000)}`));
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(`npm install ${spec} 启动失败: ${err.message}`));
+    });
+  });
+}
+
+// 从已安装包的 package.json 中解析可执行入口的绝对路径
+function resolvePackageEntry(packageName, binName) {
+  const pkgDir = path.join(__dirname, 'node_modules', ...packageName.split('/'));
+  const pkgJsonPath = path.join(pkgDir, 'package.json');
+  if (!fs.existsSync(pkgJsonPath)) {
+    throw new Error(`包 ${packageName} 未安装（未找到 ${pkgJsonPath}）`);
+  }
+
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  let relEntry = null;
+  if (pkg.bin) {
+    if (typeof pkg.bin === 'string') {
+      relEntry = pkg.bin;
+    } else if (binName) {
+      if (!pkg.bin[binName]) {
+        throw new Error(`包 ${packageName} 不存在 bin 入口 "${binName}"，可用: ${Object.keys(pkg.bin).join(', ')}`);
+      }
+      relEntry = pkg.bin[binName];
+    } else {
+      const keys = Object.keys(pkg.bin);
+      if (keys.length === 1) {
+        relEntry = pkg.bin[keys[0]];
+      } else {
+        throw new Error(`包 ${packageName} 存在多个 bin 入口 (${keys.join(', ')})，请在服务配置中通过 "binName" 显式指定`);
+      }
+    }
+  }
+  if (!relEntry && pkg.main) relEntry = pkg.main;
+  if (!relEntry) {
+    throw new Error(`无法解析包 ${packageName} 的入口文件（package.json 中无 bin / main 字段）`);
+  }
+
+  let entryPath = path.resolve(pkgDir, relEntry);
+  if (!fs.existsSync(entryPath) && fs.existsSync(`${entryPath}.js`)) entryPath += '.js';
+  if (!fs.existsSync(entryPath)) {
+    throw new Error(`包 ${packageName} 解析出的入口文件不存在: ${entryPath}`);
+  }
+  return entryPath;
+}
+
 let configPath = path.join(__dirname, 'config.json');
 if (!fs.existsSync(configPath)) {
   const examplePath = path.join(__dirname, 'config.example.json');
@@ -60,12 +167,15 @@ class BackendManager {
     this.key = serviceKey;
     this.config = serviceConfig;
     this.idleMinutes = serviceConfig.idleTimeoutMinutes || DEFAULT_IDLE_MINUTES;
-    this.status = 'sleeping'; // sleeping | starting | running
+    this.status = 'sleeping'; // sleeping | installing | starting | running
     this.client = null;
     this.transport = null;
     this.idleTimer = null;
     this.lastActiveTime = null;
     this.startPromise = null;
+    this.lastError = null;
+    this.resolvedCommand = null; // ensureEntry() 之后的实际启动命令
+    this.resolvedArgs = null;    // ensureEntry() 之后的实际启动参数
     this.cachedTools = this.loadToolsCache();
     this.stats = { totalCalls: 0, wakeups: 0 };
   }
@@ -104,6 +214,48 @@ class BackendManager {
     await this.stop();
   }
 
+  // 解析实际启动命令与参数：传统 command/args 模式 或 npm 包自动安装模式。
+  // 结果缓存于 resolvedCommand / resolvedArgs，重复调用为幂等快速返回。
+  async ensureEntry() {
+    if (this.resolvedCommand) return;
+
+    const resolveArg = (arg) => {
+      if (arg.startsWith('./') || arg.startsWith('.\\')) {
+        return path.resolve(__dirname, arg);
+      }
+      return resolveEnvString(arg);
+    };
+    const args = this.config.args || [];
+
+    if (this.config.command) {
+      if (this.config.package) {
+        console.warn(`[Gateway] 服务 [${this.key}] 同时配置了 "command" 与 "package"，已优先采用 "command"`);
+      }
+      this.resolvedCommand = this.config.command === 'node' ? process.execPath : this.config.command;
+      this.resolvedArgs = args.map(resolveArg);
+      return;
+    }
+
+    if (!this.config.package) {
+      throw new Error(`服务 [${this.key}] 缺少 "command" 或 "package" 配置，无法确定启动方式`);
+    }
+
+    const { name, version } = parsePackageSpec(this.config.package);
+    const pkgDir = path.join(__dirname, 'node_modules', ...name.split('/'));
+
+    if (!fs.existsSync(path.join(pkgDir, 'package.json'))) {
+      const spec = version ? `${name}@${version}` : name;
+      console.log(`[Gateway] 服务 [${this.key}] 依赖包 ${spec} 尚未安装，正在自动执行 npm install ...`);
+      this.status = 'installing';
+      await runNpmInstall(spec, this.config.installTimeoutMs || 300000);
+      console.log(`[Gateway] 服务 [${this.key}] 依赖包 ${spec} 安装完成`);
+    }
+
+    const entryPath = resolvePackageEntry(name, this.config.binName);
+    this.resolvedCommand = process.execPath;
+    this.resolvedArgs = [entryPath, ...args.map(resolveArg)];
+  }
+
   // 获取正在运行的 client，若未运行则秒级唤醒
   async getOrStart() {
     if (this.client && this.status === 'running') {
@@ -120,13 +272,15 @@ class BackendManager {
       const startTime = Date.now();
       console.log(`[Gateway] 唤醒服务进程 [${this.key}]...`);
 
-      const command = this.config.command === 'node' ? process.execPath : this.config.command;
-      const resolvedArgs = (this.config.args || []).map(arg => {
-        if (arg.startsWith('./') || arg.startsWith('.\\')) {
-          return path.resolve(__dirname, arg);
-        }
-        return resolveEnvString(arg);
-      });
+      try {
+        await this.ensureEntry();
+      } catch (err) {
+        this.status = 'sleeping';
+        this.lastError = err.message;
+        throw err;
+      }
+      const command = this.resolvedCommand;
+      const resolvedArgs = this.resolvedArgs;
 
       const env = {
         ...process.env,
@@ -147,6 +301,7 @@ class BackendManager {
       try {
         await this.client.connect(this.transport);
         this.status = 'running';
+        this.lastError = null;
         this.stats.wakeups++;
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
         console.log(`[Gateway] 服务 [${this.key}] 唤醒成功 (耗时 ${elapsed}s)`);
@@ -171,6 +326,7 @@ class BackendManager {
         return this.client;
       } catch (err) {
         this.status = 'sleeping';
+        this.lastError = err.message;
         this.client = null;
         this.transport = null;
         console.error(`[Gateway] 唤醒服务 [${this.key}] 失败:`, err);
@@ -262,6 +418,7 @@ app.get('/', (req, res) => {
       remainingIdleSeconds: backend.status === 'running' ? remainingIdleSec : null,
       toolsCount: tCount,
       stats: backend.stats,
+      error: backend.lastError || null,
       sseUrl: `http://127.0.0.1:${PORT}/${key}/sse`
     };
   }
@@ -438,12 +595,15 @@ const server = app.listen(PORT, '127.0.0.1', async () => {
     console.log(`    - ${key.padEnd(14)} : http://127.0.0.1:${PORT}/${key}/sse`);
   }
   console.log('──────────────────────────────────────────────────────────────');
-  console.log('正在预热并检查各服务的工具 Schema 缓存...');
+  console.log('正在初始化服务依赖并预热工具 Schema 缓存...');
   for (const backend of backends.values()) {
+    if (backend.config.enabled === false) continue;
     try {
+      await backend.ensureEntry();
       await backend.warmCacheIfNeeded();
     } catch (err) {
-      console.error(`[Gateway] 服务 [${backend.key}] 预热失败:`, err.message);
+      backend.lastError = err.message;
+      console.error(`[Gateway] 服务 [${backend.key}] 初始化失败:`, err.message);
     }
   }
   console.log('所有后端已置入冷态休眠（Scale-to-Zero，物理内存 0 MB）。');
