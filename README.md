@@ -78,7 +78,7 @@ npm install
 cp config.example.json config.json
 ```
 
-根据您的需求修改 `config.json`（支持环境变量动态插值 `${VAR_NAME}`）。**npm 服务只需声明包名**，网关会自动完成安装与入口解析：
+**npm 服务只需声明包名**，网关会自动完成安装与入口解析：
 
 ```json
 {
