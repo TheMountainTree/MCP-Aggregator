@@ -232,7 +232,9 @@ class BackendManager {
         console.warn(`[Gateway] 服务 [${this.key}] 同时配置了 "command" 与 "package"，已优先采用 "command"`);
       }
       this.resolvedCommand = this.config.command === 'node' ? process.execPath : this.config.command;
-      this.resolvedArgs = args.map(resolveArg);
+      // nodeArgs 仅对 node 运行时有效（用于 --require 等运行时开关）
+      const nodeArgs = this.config.command === 'node' ? (this.config.nodeArgs || []).map(resolveArg) : [];
+      this.resolvedArgs = [...nodeArgs, ...args.map(resolveArg)];
       return;
     }
 
@@ -253,7 +255,8 @@ class BackendManager {
 
     const entryPath = resolvePackageEntry(name, this.config.binName);
     this.resolvedCommand = process.execPath;
-    this.resolvedArgs = [entryPath, ...args.map(resolveArg)];
+    const nodeArgs = (this.config.nodeArgs || []).map(resolveArg);
+    this.resolvedArgs = [...nodeArgs, entryPath, ...args.map(resolveArg)];
   }
 
   // 获取正在运行的 client，若未运行则秒级唤醒

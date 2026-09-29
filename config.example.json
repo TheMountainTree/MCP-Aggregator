@@ -10,6 +10,7 @@
     },
     "brave-search": {
       "package": "@brave/brave-search-mcp-server",
+      "nodeArgs": ["--require", "./proxy-bootstrap.cjs"],
       "args": [],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}",
