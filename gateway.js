@@ -8,6 +8,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -139,7 +141,10 @@ function resolvePackageEntry(packageName, binName) {
   return entryPath;
 }
 
-let configPath = path.join(__dirname, 'config.json');
+const configWritePath = path.join(__dirname, 'config.json');
+let configPath = process.env.GATEWAY_CONFIG
+  ? path.resolve(process.env.GATEWAY_CONFIG)
+  : configWritePath;
 if (!fs.existsSync(configPath)) {
   const examplePath = path.join(__dirname, 'config.example.json');
   if (fs.existsSync(examplePath)) {
@@ -151,9 +156,8 @@ if (!fs.existsSync(configPath)) {
   }
 }
 
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-const PORT = config.port || 3300;
-const DEFAULT_IDLE_MINUTES = config.defaultIdleTimeoutMinutes || 60;
+let currentConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+const PORT = currentConfig.port || 3300;
 
 // 确保缓存目录存在
 const cacheDir = path.join(__dirname, 'cache');
@@ -166,7 +170,9 @@ class BackendManager {
   constructor(serviceKey, serviceConfig) {
     this.key = serviceKey;
     this.config = serviceConfig;
-    this.idleMinutes = serviceConfig.idleTimeoutMinutes || DEFAULT_IDLE_MINUTES;
+    this.isRemoteService = !!serviceConfig.url;
+    this.mode = this.isRemoteService ? 'remote' : (serviceConfig.package ? 'npm' : 'stdio');
+    this.idleMinutes = serviceConfig.idleTimeoutMinutes || currentConfig.defaultIdleTimeoutMinutes || 60;
     this.status = 'sleeping'; // sleeping | installing | starting | running
     this.client = null;
     this.transport = null;
@@ -218,6 +224,7 @@ class BackendManager {
   // 结果缓存于 resolvedCommand / resolvedArgs，重复调用为幂等快速返回。
   async ensureEntry() {
     if (this.resolvedCommand) return;
+    if (this.isRemoteService) return; // 远程 HTTP 服务无需本地命令与入口
 
     const resolveArg = (arg) => {
       if (arg.startsWith('./') || arg.startsWith('.\\')) {
@@ -259,7 +266,7 @@ class BackendManager {
     this.resolvedArgs = [...nodeArgs, entryPath, ...args.map(resolveArg)];
   }
 
-  // 获取正在运行的 client，若未运行则秒级唤醒
+  // 获取正在运行的 client，若未运行则秒级唤醒（本地进程）或重连（远程 HTTP）
   async getOrStart() {
     if (this.client && this.status === 'running') {
       this.touch();
@@ -270,76 +277,119 @@ class BackendManager {
       return await this.startPromise;
     }
 
-    this.startPromise = (async () => {
-      this.status = 'starting';
-      const startTime = Date.now();
-      console.log(`[Gateway] 唤醒服务进程 [${this.key}]...`);
+    this.startPromise = this.doStart().finally(() => { this.startPromise = null; });
+    return await this.startPromise;
+  }
 
-      try {
-        await this.ensureEntry();
-      } catch (err) {
-        this.status = 'sleeping';
-        this.lastError = err.message;
-        throw err;
+  async doStart() {
+    this.status = 'starting';
+    const startTime = Date.now();
+    console.log(`[Gateway] 唤醒服务 [${this.key}]...`);
+
+    try {
+      if (this.isRemoteService) {
+        await this.startRemoteClient();
+      } else {
+        await this.startStdioClient();
       }
-      const command = this.resolvedCommand;
-      const resolvedArgs = this.resolvedArgs;
 
-      const env = {
-        ...process.env,
-        ...resolveEnvMap(this.config.env || {})
-      };
+      this.status = 'running';
+      this.lastError = null;
+      this.stats.wakeups++;
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+      console.log(`[Gateway] 服务 [${this.key}] 唤醒成功 (耗时 ${elapsed}s, ${this.isRemoteService ? '远程连接' : '本地进程'})`);
 
-      this.transport = new StdioClientTransport({
-        command: command,
-        args: resolvedArgs,
-        env: env
-      });
-
-      this.client = new Client(
-        { name: `gateway-${this.key}`, version: '1.0.0' },
-        { capabilities: {} }
-      );
-
-      try {
-        await this.client.connect(this.transport);
-        this.status = 'running';
-        this.lastError = null;
-        this.stats.wakeups++;
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`[Gateway] 服务 [${this.key}] 唤醒成功 (耗时 ${elapsed}s)`);
-
-        // 优化唤醒耗时：若已有缓存，不阻塞当前请求，后台静默刷新缓存
-        if (!this.cachedTools || this.cachedTools.length === 0) {
-          const toolsResult = await this.client.listTools();
+      // 优化唤醒耗时：若已有缓存，不阻塞当前请求，后台静默刷新缓存
+      if (!this.cachedTools || this.cachedTools.length === 0) {
+        const toolsResult = await this.client.listTools();
+        if (toolsResult && toolsResult.tools) {
+          this.saveToolsCache(toolsResult.tools);
+        }
+      } else {
+        this.client.listTools().then((toolsResult) => {
           if (toolsResult && toolsResult.tools) {
             this.saveToolsCache(toolsResult.tools);
           }
-        } else {
-          this.client.listTools().then((toolsResult) => {
-            if (toolsResult && toolsResult.tools) {
-              this.saveToolsCache(toolsResult.tools);
-            }
-          }).catch((err) => {
-            console.warn(`[Gateway] 后台异步刷新 [${this.key}] 工具缓存异常:`, err.message);
-          });
-        }
-
-        this.touch();
-        return this.client;
-      } catch (err) {
-        this.status = 'sleeping';
-        this.lastError = err.message;
-        this.client = null;
-        this.transport = null;
-        console.error(`[Gateway] 唤醒服务 [${this.key}] 失败:`, err);
-        throw err;
-      } finally {
-        this.startPromise = null;
+        }).catch((err) => {
+          console.warn(`[Gateway] 后台异步刷新 [${this.key}] 工具缓存异常:`, err.message);
+        });
       }
-    })();
 
-    return await this.startPromise;
+      this.touch();
+      return this.client;
+    } catch (err) {
+      this.status = 'sleeping';
+      this.lastError = err.message;
+      this.client = null;
+      this.transport = null;
+      console.error(`[Gateway] 唤醒服务 [${this.key}] 失败:`, err);
+      throw err;
+    }
+  }
+
+  // 本地 stdio 子进程模式（npm 包自动安装 / uvx / 任意命令）
+  async startStdioClient() {
+    await this.ensureEntry();
+
+    const env = {
+      ...process.env,
+      ...resolveEnvMap(this.config.env || {})
+    };
+
+    this.transport = new StdioClientTransport({
+      command: this.resolvedCommand,
+      args: this.resolvedArgs,
+      env: env
+    });
+
+    this.client = new Client(
+      { name: `gateway-${this.key}`, version: '1.0.0' },
+      { capabilities: {} }
+    );
+    await this.client.connect(this.transport);
+  }
+
+  // 远程 HTTP 模式：Streamable HTTP 优先，失败回退旧式 SSE；空闲断连即远程版 Scale-to-Zero
+  async startRemoteClient() {
+    const url = new URL(resolveEnvString(this.config.url));
+    const headers = resolveEnvMap(this.config.headers || {});
+
+    const attempts = [];
+    if (this.config.transport !== 'sse') attempts.push('http');
+    if (this.config.transport !== 'http') attempts.push('sse');
+
+    let lastErr = null;
+    for (const kind of attempts) {
+      const transport = kind === 'http'
+        ? new StreamableHTTPClientTransport(url, { requestInit: { headers } })
+        : new SSEClientTransport(url, { requestInit: { headers } });
+      const client = new Client(
+        { name: `gateway-${this.key}`, version: '1.0.0' },
+        { capabilities: {} }
+      );
+      try {
+        await client.connect(transport);
+        this.client = client;
+        this.transport = transport;
+
+        // 连接被对端或网络断开时置为休眠，下次调用自动重连
+        client.onclose = () => {
+          if (this.status === 'running' && this.client === client) {
+            console.log(`[Gateway] 远程服务 [${this.key}] 连接已断开，下次调用将自动重连`);
+            this.status = 'sleeping';
+            this.client = null;
+            this.transport = null;
+          }
+        };
+
+        console.log(`[Gateway] 远程服务 [${this.key}] 已建立 ${kind === 'http' ? 'Streamable HTTP' : 'SSE'} 连接`);
+        return;
+      } catch (err) {
+        lastErr = err;
+        try { await client.close(); } catch (e) { /* 忽略清理异常 */ }
+      }
+    }
+    throw lastErr;
   }
 
   // 触摸保活：重置空闲倒计时
@@ -362,6 +412,7 @@ class BackendManager {
       this.idleTimer = null;
     }
     if (this.client) {
+      try { this.client.onclose = null; } catch (e) { /* 忽略 */ }
       try {
         await this.client.close();
       } catch (e) {
@@ -377,7 +428,7 @@ class BackendManager {
 
 // 3. 初始化所有服务
 const backends = new Map();
-for (const [key, svcConfig] of Object.entries(config.services)) {
+for (const [key, svcConfig] of Object.entries(currentConfig.services || {})) {
   backends.set(key, new BackendManager(key, svcConfig));
 }
 
@@ -400,8 +451,32 @@ app.use(cors());
 // 保存活跃的 SSE transports: sessionId -> SSEServerTransport
 const transports = new Map();
 
-// 仪表盘 / 健康检查状态接口
+// 网页控制台：浏览器访问 http://127.0.0.1:PORT/ 即可监控与配置
 app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// A0. 管理 API（网页控制台后端）：/api/status、/api/config、/api/services/:key/{wake,sleep}
+//     仅监听 127.0.0.1；/api/* 额外做同源校验，防止浏览器跨站读取配置或触发写操作
+// ══════════════════════════════════════════════════════════════════════════════
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    const allowed = new Set([
+      `http://127.0.0.1:${PORT}`,
+      `http://localhost:${PORT}`
+    ]);
+    if (!allowed.has(origin)) {
+      return res.status(403).json({ error: '跨域请求被拒绝（管理 API 仅允许同源访问）' });
+    }
+  }
+  next();
+});
+app.use('/api', express.json({ limit: '1mb' }));
+
+// 仪表盘 / 健康检查状态接口（JSON）
+app.get('/api/status', (req, res) => {
   const mem = process.memoryUsage();
   const servicesStatus = {};
   let totalTools = 0;
@@ -417,12 +492,15 @@ app.get('/', (req, res) => {
 
     servicesStatus[key] = {
       status: backend.status,
+      mode: backend.mode,
+      enabled: backend.config.enabled !== false,
       idleTimeoutMinutes: backend.idleMinutes,
       remainingIdleSeconds: backend.status === 'running' ? remainingIdleSec : null,
       toolsCount: tCount,
       stats: backend.stats,
       error: backend.lastError || null,
-      sseUrl: `http://127.0.0.1:${PORT}/${key}/sse`
+      sseUrl: `http://127.0.0.1:${PORT}/${key}/sse`,
+      remoteUrl: backend.isRemoteService ? backend.config.url : null
     };
   }
 
@@ -441,6 +519,112 @@ app.get('/', (req, res) => {
       unified_message: `http://127.0.0.1:${PORT}/message`
     },
     services: servicesStatus
+  });
+});
+
+// 立即唤醒指定服务（本地进程拉起 / 远程重连）
+app.post('/api/services/:service/wake', async (req, res) => {
+  const backend = backends.get(req.params.service);
+  if (!backend) return res.status(404).json({ error: `Unknown service: ${req.params.service}` });
+  try {
+    await backend.getOrStart();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 立即休眠指定服务（杀掉子进程 / 断开远程连接，内存归零）
+app.post('/api/services/:service/sleep', async (req, res) => {
+  const backend = backends.get(req.params.service);
+  if (!backend) return res.status(404).json({ error: `Unknown service: ${req.params.service}` });
+  await backend.stop();
+  res.json({ ok: true });
+});
+
+// 读取当前配置原文（含密钥，仅限本机同源访问）
+app.get('/api/config', (req, res) => {
+  res.type('application/json').send(fs.readFileSync(configPath, 'utf8'));
+});
+
+// 校验配置结构：port / defaultIdleTimeoutMinutes / services[].[command|package|url]
+function validateConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return '配置必须是一个 JSON 对象';
+  }
+  if (cfg.port !== undefined && (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535)) {
+    return 'port 必须是 1-65535 的整数';
+  }
+  if (cfg.services === undefined || cfg.services === null || typeof cfg.services !== 'object' || Array.isArray(cfg.services)) {
+    return 'services 必须是一个对象';
+  }
+  for (const [key, svc] of Object.entries(cfg.services)) {
+    if (!svc || typeof svc !== 'object') {
+      return `服务 [${key}] 的配置必须是对象`;
+    }
+    if (!svc.command && !svc.package && !svc.url) {
+      return `服务 [${key}] 缺少 "command" / "package" / "url" 之一，无法确定启动方式`;
+    }
+  }
+  return null;
+}
+
+// 热重建所有后端（保留磁盘工具缓存，已连接的旧会话自然过期）
+async function rebuildBackends() {
+  for (const backend of backends.values()) {
+    try { await backend.stop(); } catch (e) { /* 忽略 */ }
+  }
+  backends.clear();
+  for (const [key, svcConfig] of Object.entries(currentConfig.services || {})) {
+    backends.set(key, new BackendManager(key, svcConfig));
+  }
+}
+
+async function warmAllBackends() {
+  for (const backend of backends.values()) {
+    if (backend.config.enabled === false) continue;
+    try {
+      await backend.ensureEntry();
+      await backend.warmCacheIfNeeded();
+    } catch (err) {
+      backend.lastError = err.message;
+      console.error(`[Gateway] 服务 [${backend.key}] 初始化失败:`, err.message);
+    }
+  }
+}
+
+// 保存配置并热应用（写盘前自动备份 .bak；端口变更需重启生效，服务配置即时生效）
+app.post('/api/config', async (req, res) => {
+  const cfg = req.body;
+  const invalid = validateConfig(cfg);
+  if (invalid) {
+    return res.status(400).json({ error: `配置校验失败: ${invalid}` });
+  }
+
+  try {
+    // 写入目标与读取目标保持一致：显式指定 GATEWAY_CONFIG 时（如测试场景）
+    // 只写回该文件，绝不触碰项目根目录的 config.json
+    const writePath = process.env.GATEWAY_CONFIG ? configPath : configWritePath;
+    if (fs.existsSync(writePath)) {
+      fs.copyFileSync(writePath, `${writePath}.bak`);
+    }
+    fs.writeFileSync(writePath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    configPath = writePath;
+  } catch (err) {
+    return res.status(500).json({ error: `写入配置文件失败: ${err.message}` });
+  }
+
+  const portChanged = cfg.port !== undefined && cfg.port !== PORT;
+  currentConfig = cfg;
+  await rebuildBackends();
+  warmAllBackends().catch(() => { /* 预热失败已在内部记录 */ });
+
+  res.json({
+    ok: true,
+    portChanged,
+    message: portChanged
+      ? '配置已保存并热应用；端口已变更，重启网关后新端口生效'
+      : '配置已保存并热应用'
   });
 });
 
@@ -599,16 +783,7 @@ const server = app.listen(PORT, '127.0.0.1', async () => {
   }
   console.log('──────────────────────────────────────────────────────────────');
   console.log('正在初始化服务依赖并预热工具 Schema 缓存...');
-  for (const backend of backends.values()) {
-    if (backend.config.enabled === false) continue;
-    try {
-      await backend.ensureEntry();
-      await backend.warmCacheIfNeeded();
-    } catch (err) {
-      backend.lastError = err.message;
-      console.error(`[Gateway] 服务 [${backend.key}] 初始化失败:`, err.message);
-    }
-  }
+  await warmAllBackends();
   console.log('所有后端已置入冷态休眠（Scale-to-Zero，物理内存 0 MB）。');
   console.log('等待 Agent 请求唤醒中...');
 });

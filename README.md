@@ -13,12 +13,13 @@
 
 1. **统一单端点聚合 (Unified SSE Endpoint)**：
    - 对所有 AI Agent 仅暴露单一统一入口：`http://127.0.0.1:3300/sse`。
+   - 聚合对象覆盖**全部后端形态**：stdio（npm 包 / uvx / 任意命令）与**远程 HTTP MCP**（Streamable HTTP 优先、旧式 SSE 自动回退）。
    - 自动聚合所有挂载服务的工具定义，智能根据工具名称完成 O(1) 请求路由与转发。
    - 保持向后兼容：依然保留分立端点 `http://127.0.0.1:3300/:service/sse` 供独立调用。
 
 2. **真·按需秒级拉起 + 冷态归零 (Scale-to-Zero)**：
-   - **冷态 0 MB**：闲时所有后台服务子进程（MS365、Brave 等）**完全不运行**，物理内存占用为 0。
-   - **秒级拉起**：当任何 Agent 触发对应工具调用时，网关瞬间唤醒单例进程处理。
+   - **冷态 0 MB**：闲时所有后台服务子进程（MS365、Brave 等）**完全不运行**，物理内存占用为 0；远程 HTTP 后端则为空闲断连，不占用对端会话。
+   - **秒级拉起**：当任何 Agent 触发对应工具调用时，网关瞬间唤醒单例进程处理（远程服务自动重连）。
    - **空闲回收**：支持自定义超时倒计时（默认 60 分钟），无请求自动杀掉子进程，释放系统资源。
 
 3. **Schema 毫秒级极速响应 (Zero-Delay Cache)**：
@@ -32,6 +33,10 @@
    - 支持通过声明式配置载入任意运行时：Node.js、Python (`uv run`)、本地可执行二进制，支持环境变量动态插值（`${ENV_VAR}`）。
    - npm 服务**只需声明包名**：网关启动时自动补装缺失依赖，并从包的 `bin` / `main` 字段自动解析真实入口，无需手动查找路径。
 
+6. **网页控制台 (Web Console)**：
+   - 浏览器访问 `http://127.0.0.1:3300/` 即可**监控与配置**：实时状态卡片、唤醒/休眠操作、配置在线编辑并热应用（写盘前自动备份 `.bak`）。
+   - 管理接口带同源防护，跨域网页无法读取配置或触发写操作。
+
 ---
 
 ## 🏗️ 架构示意 (Architecture)
@@ -43,19 +48,20 @@
                        ▼
 ┌────────────────────────────────────────────────────────┐
 │            MCP-Aggregator Gateway (Express)            │
-│  ├─ 仪表盘 / 监控: GET /                               │
+│  ├─ 网页控制台: GET /（监控 + 配置热编辑）             │
 │  ├─ 统一聚合端点: GET /sse                             │
 │  ├─ 分立兼容端点: GET /:service/sse                    │
+│  ├─ 管理 API: /api/status · /api/config · wake/sleep   │
 │  ├─ Schema 缓存层: cache/<service>-tools.json (<1ms)   │
 │  └─ Scale-to-Zero 状态机 (sleeping / starting / warm)  │
 └───────────────────────┬────────────────────────────────┘
-                        │ 按需拉起（脱壳直连）
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
-┌──────────────┐┌──────────────┐┌──────────────┐
-│  Node: ms365 ││ Node: brave  ││ Python / CLI │
-│  (0MB 或热态)││ (0MB 或热态) ││ (扩展服务)   │
-└──────────────┘└──────────────┘└──────────────┘
+                        │ 按需拉起（脱壳直连） / 按需重连
+        ┌───────────────┼───────────────┬─────────────────┐
+        ▼               ▼               ▼                 ▼
+┌──────────────┐┌──────────────┐┌──────────────┐┌──────────────────┐
+│  Node: ms365 ││ Node: brave  ││ Python / uvx ││ 远程 HTTP MCP    │
+│  (0MB 或热态)││ (0MB 或热态) ││ (扩展服务)   ││ (Streamable/SSE) │
+└──────────────┘└──────────────┘└──────────────┘└──────────────────┘
 ```
 
 ---
@@ -117,7 +123,7 @@ cp config.example.json config.json
 * **Linux / macOS 运行与停止**：
   `./start.sh` 与 `./stop.sh`。
 
-访问 `http://127.0.0.1:3300/` 可实时查看网关健康状态、内存用量、工具数量与休眠倒计时。
+访问 `http://127.0.0.1:3300/` 打开**网页控制台**，可实时监控各服务状态、手动唤醒/休眠，并在线编辑配置（保存即热应用）。
 
 ---
 
@@ -184,18 +190,11 @@ http://127.0.0.1:3300/sse
 
 ```json
 "brave-search": {
-  "name": "brave-search",
+  "package": "@brave/brave-search-mcp-server",
   "enabled": false,
-  "command": "node",
-  "args": [
-    "--use-env-proxy",
-    "./node_modules/@brave/brave-search-mcp-server/dist/index.js"
-  ],
+  "args": [],
   "env": {
-    "BRAVE_API_KEY": "${BRAVE_API_KEY}",
-    "HTTP_PROXY": "http://127.0.0.1:7890",
-    "HTTPS_PROXY": "http://127.0.0.1:7890",
-    "NODE_USE_ENV_PROXY": "1"
+    "BRAVE_API_KEY": "${BRAVE_API_KEY}"
   },
   "idleTimeoutMinutes": 15
 }
@@ -207,38 +206,46 @@ http://127.0.0.1:3300/sse
 
 ---
 
-## 📊 仪表盘与监控 API
+## 📊 网页控制台与管理 API
 
-浏览器或 curl 直接访问 `http://127.0.0.1:3300/`，返回实时状态：
+浏览器访问 `http://127.0.0.1:3300/` 打开网页控制台：
+
+- **监控**：网关内存/运行时长/工具总数，每个服务的状态徽章（休眠/安装中/启动中/运行中）、工具数、空闲回收倒计时、累计调用与唤醒、错误信息；
+- **操作**：对任意服务「立即唤醒」或「立即休眠」；
+- **配置**：在线编辑 `config.json`（JSON 校验 → 写盘前自动备份 `.bak` → **热应用**，服务增删改即时生效；修改 `port` 会提示需重启）。
+
+脚本化监控可使用 JSON 接口 `GET /api/status`（控制台的数据源）：
 
 ```json
 {
   "status": "ok",
-  "gateway": {
-    "name": "MCP-Aggregator",
-    "version": "1.0.0",
-    "uptimeSeconds": 128,
-    "memoryRSS_MB": "52.4",
-    "memoryHeapUsed_MB": "24.6",
-    "totalAggregatedTools": 50
-  },
-  "endpoints": {
-    "unified_sse": "http://127.0.0.1:3300/sse",
-    "unified_message": "http://127.0.0.1:3300/message"
-  },
+  "gateway": { "memoryRSS_MB": "52.4", "totalAggregatedTools": 50, "...": "..." },
   "services": {
     "ms365": {
       "status": "sleeping",
+      "mode": "npm",
+      "enabled": true,
       "idleTimeoutMinutes": 60,
       "remainingIdleSeconds": null,
       "toolsCount": 42,
       "stats": { "totalCalls": 4, "wakeups": 1 },
       "error": null,
-      "sseUrl": "http://127.0.0.1:3300/ms365/sse"
+      "sseUrl": "http://127.0.0.1:3300/ms365/sse",
+      "remoteUrl": null
     }
   }
 }
 ```
+
+管理 API 一览（`/api/*` 带同源防护，跨域网页访问返回 403）：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/api/status` | 网关与服务实时状态（JSON） |
+| GET | `/api/config` | 读取当前配置原文 |
+| POST | `/api/config` | 校验并保存配置，热应用（自动 `.bak` 备份） |
+| POST | `/api/services/:key/wake` | 立即唤醒/重连指定服务 |
+| POST | `/api/services/:key/sleep` | 立即休眠指定服务（进程销毁/断连） |
 
 ---
 
@@ -281,6 +288,35 @@ http://127.0.0.1:3300/sse
 ```
 
 两种模式均支持环境变量插值（`${ENV_VAR}`）；`args` 中以 `./` 开头的路径会自动解析为网关项目根目录下的绝对路径。注意：`args` 中的参数会传给 MCP 服务本身；若需向 Node 运行时传递开关（如 `--require` 预加载脚本），请使用 `"nodeArgs"`。
+
+### 方式三：远程 HTTP MCP（Streamable HTTP / SSE）
+
+聚合一个部署在远端（或本机其他端口）的 HTTP MCP 服务，无需任何本地进程：
+
+```json
+"my-remote-service": {
+  "url": "https://mcp.example.com/mcp",
+  "headers": {
+    "Authorization": "Bearer ${MCP_TOKEN}"
+  },
+  "idleTimeoutMinutes": 30
+}
+```
+
+说明：
+
+- 传输协议自动协商：优先 **Streamable HTTP**，失败自动回退旧式 **SSE**；也可通过 `"transport": "sse" | "http"` 显式指定；
+- `headers` 支持环境变量插值（`${VAR}`），用于放置鉴权头等；
+- **远程版 Scale-to-Zero**：空闲超时后自动断开连接（不占用对端会话/连接配额），下次调用自动重连；连接意外断开同样会在下次调用时自动恢复；
+- 该服务的分立端点 `/:service/sse` 与统一端点路由行为与本地服务完全一致。
+
+### 测试
+
+```bash
+node test/e2e.mjs
+```
+
+端到端测试会自动启动一个本地 Streamable HTTP 测试服务器与一套隔离的网关实例（独立端口与临时配置文件，不影响正在运行的网关），覆盖：远程聚合、统一端点路由、分立端点、wake/sleep、配置读取/校验/热应用、同源防护与网页控制台。
 
 ---
 
