@@ -77,6 +77,8 @@
   }
   .field textarea { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; min-height: 64px; resize: vertical; }
   .field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid #bcd3f8; border-color: var(--accent); }
+  .field input:disabled { background: var(--panel2); color: var(--muted); }
+  .edit-tag { font-size: 12px; color: var(--accent); font-weight: 600; margin-left: 8px; }
   .hint { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
   .form-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
   .form-msg { font-size: 12.5px; }
@@ -125,7 +127,7 @@
 
   <!-- 路径一：表单式添加 -->
   <section class="add-svc">
-    <h2>添加 MCP 服务（表单模式）</h2>
+    <h2>添加 MCP 服务（表单模式）<span id="edit-indicator" class="edit-tag" style="display:none">正在编辑：<b id="edit-key"></b>（服务名不可改，如需重命名请删除后重新添加）</span></h2>
     <div class="form-panel">
       <div class="field">
         <label>服务名称 <span class="req">*</span></label>
@@ -201,6 +203,7 @@
 
       <div class="form-actions">
         <button class="primary" id="btn-add">添加并热应用</button>
+        <button id="btn-cancel-edit" style="display:none">取消编辑</button>
         <button id="btn-form-clear">清空表单</button>
         <span class="form-msg" id="add-msg"></span>
       </div>
@@ -293,6 +296,7 @@
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'wake\')"' + (wakeDisabled ? ' disabled' : '') + '>立即唤醒</button>'
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'sleep\')"' + (sleepDisabled ? ' disabled' : '') + '>立即休眠</button>'
       + '<span class="spacer" style="flex:1"></span>'
+      + '<button onclick="svcEdit(\'' + escapeHtml(key) + '\')">编辑</button>'
       + '<button class="danger" onclick="svcRemove(\'' + escapeHtml(key) + '\')">删除</button>'
       + '</div>'
       + '</div>';
@@ -346,11 +350,58 @@
     });
   };
 
-  /* ── 表单式添加 ───────────────────────────────────── */
+  /* ── 表单式添加 / 编辑 ────────────────────────────── */
+  var editingKey = null;
+
   function setAddMsg(text, ok) {
     var el = $('add-msg');
     el.textContent = text;
     el.className = 'form-msg ' + (ok ? 'ok' : 'bad');
+  }
+
+  function kvToLines(obj) {
+    if (!obj) return '';
+    return Object.keys(obj).map(function (k) { return k + '=' + obj[k]; }).join('\n');
+  }
+
+  // 编辑已有服务：按当前配置回填表单，服务名锁定
+  window.svcEdit = function (key) {
+    fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+      var svc = cfg.services && cfg.services[key];
+      if (!svc) { setAddMsg('服务 [' + key + '] 不存在或配置无法读取', false); return; }
+      editingKey = key;
+      setAddType(svc.url ? 'remote' : (svc.package ? 'npm' : 'cmd'));
+      $('f-name').value = key;
+      $('f-name').disabled = true;
+      $('f-package').value = svc.package || '';
+      $('f-bin').value = svc.binName || '';
+      $('f-nodeargs').value = (svc.nodeArgs || []).join('\n');
+      $('f-command').value = svc.command || '';
+      $('f-url').value = svc.url || '';
+      $('f-headers').value = kvToLines(svc.headers);
+      $('f-transport').value = svc.transport || 'auto';
+      $('f-args').value = (svc.args || []).join('\n');
+      $('f-env').value = kvToLines(svc.env);
+      $('f-idle').value = svc.idleTimeoutMinutes || '';
+      $('f-enabled').checked = svc.enabled !== false;
+      $('edit-key').textContent = key;
+      $('edit-indicator').style.display = '';
+      $('btn-add').textContent = '保存修改并热应用';
+      $('btn-cancel-edit').style.display = '';
+      setAddMsg('正在编辑 [' + key + ']，修改完成后点击保存', true);
+      document.querySelector('.form-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }).catch(function (e) {
+      setAddMsg('读取配置失败: ' + e.message, false);
+    });
+  };
+
+  function exitEdit() {
+    editingKey = null;
+    $('f-name').disabled = false;
+    $('edit-indicator').style.display = 'none';
+    $('btn-add').textContent = '添加并热应用';
+    $('btn-cancel-edit').style.display = 'none';
+    clearForm();
   }
 
   function parseLines(t) {
@@ -419,7 +470,7 @@
   }
 
   function submitAdd() {
-    var name = $('f-name').value.trim();
+    var name = editingKey || $('f-name').value.trim();
     var svc = buildServiceFromForm();
     var err = validateForm(name, svc);
     if (err) { setAddMsg(err, false); return; }
@@ -435,7 +486,12 @@
       setAddMsg('当前配置缺少 services 对象', false);
       return;
     }
-    if (cfg.services[name]) {
+    if (editingKey) {
+      if (!cfg.services[editingKey]) {
+        setAddMsg('服务 [' + editingKey + '] 已不在当前配置中，请取消编辑后重新添加', false);
+        return;
+      }
+    } else if (cfg.services[name]) {
       setAddMsg('服务 [' + name + '] 已存在，请换一个名称', false);
       return;
     }
@@ -447,8 +503,10 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cfg)
     }).then(function (res) {
-      setAddMsg('✓ ' + (res.message || '已添加并热应用'), true);
-      setCfgMsg('✓ 表单添加服务 ' + name, true);
+      var wasEdit = !!editingKey;
+      exitEdit();
+      setAddMsg((wasEdit ? '✓ 已更新并热应用：' : '✓ ') + (res.message || '已添加并热应用'), true);
+      setCfgMsg('✓ ' + (wasEdit ? '表单更新服务 ' : '表单添加服务 ') + name, true);
       setTimeout(refresh, 800);
     }).catch(function (e) {
       setAddMsg('保存失败: ' + e.message, false);
@@ -502,7 +560,8 @@
   $('btn-save').addEventListener('click', saveConfig);
   $('btn-reload').addEventListener('click', loadConfig);
   $('btn-add').addEventListener('click', submitAdd);
-  $('btn-form-clear').addEventListener('click', clearForm);
+  $('btn-form-clear').addEventListener('click', function () { if (editingKey) exitEdit(); else clearForm(); });
+  $('btn-cancel-edit').addEventListener('click', exitEdit);
   document.querySelectorAll('.type-btn').forEach(function (b) {
     b.addEventListener('click', function () { setAddType(b.dataset.type); });
   });

@@ -174,6 +174,7 @@ try {
     ok(html.includes('MCP-Aggregator 控制台'), 'GET / 返回控制台 HTML');
     ok(html.includes('/api/status') && html.includes('保存并热应用'), '页面包含监控与 JSON 配置编辑器逻辑');
     ok(html.includes('添加 MCP 服务') && html.includes('data-type="remote"'), '页面包含表单式添加（npm/命令/远程三种类型）');
+    ok(html.includes('svcEdit') && html.includes('取消编辑'), '页面包含服务编辑入口与取消编辑');
   }
 
   console.log('=== 8. 隔离性：真实 config.json 未被测试改写 ===');
