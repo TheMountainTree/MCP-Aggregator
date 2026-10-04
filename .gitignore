@@ -22,3 +22,4 @@ Desktop.ini
 .vscode/
 *.swp
 *.swo
+test/.tmp-*
