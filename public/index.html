@@ -6,9 +6,11 @@
 <title>MCP-Aggregator 控制台</title>
 <style>
   :root {
-    --bg: #0f1420; --panel: #171e2e; --panel2: #1d2638; --line: #2a3550;
-    --text: #dbe4f3; --muted: #8494b3; --accent: #5b9dff;
-    --green: #34c98e; --amber: #e8b34b; --gray: #6b7a99; --red: #ff6b6b;
+    --bg: #f4f6fa; --panel: #ffffff; --panel2: #f2f5f9; --line: #e2e8f2;
+    --text: #22314a; --muted: #64748c; --accent: #2563eb;
+    --green: #16a34a; --green-bg: #eafaf0; --amber: #b45309; --amber-bg: #fef6e7;
+    --gray: #64748c; --gray-bg: #eef2f7; --red: #dc2626; --red-bg: #fdeeee;
+    --shadow: 0 1px 3px rgba(34, 49, 74, .07);
   }
   * { box-sizing: border-box; }
   body {
@@ -21,11 +23,11 @@
   h1 .dot { color: var(--green); }
   .sub { color: var(--muted); font-size: 12.5px; }
   .banner {
-    display: none; background: #3a1f24; border: 1px solid #6b2f3a; color: #ffb3b3;
+    display: none; background: var(--red-bg); border: 1px solid #f3c6c6; color: #9f1d1d;
     padding: 8px 12px; border-radius: 8px; margin: 10px 0;
   }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0 26px; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); }
   .stat .k { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
   .stat .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -33,32 +35,58 @@
   .toolbar .spacer { flex: 1; }
   label.chk { color: var(--muted); font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow); }
   .card.disabled-service { opacity: .55; }
-  .card.has-error { border-color: #6b2f3a; }
+  .card.has-error { border-color: #f0b4b4; }
   .card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .svc-name { font-weight: 700; font-size: 15px; word-break: break-all; }
-  .badge { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
-  .badge.mode { background: var(--panel2); }
-  .st-sleeping { color: var(--gray); border-color: var(--gray); }
-  .st-starting, .st-installing { color: var(--amber); border-color: var(--amber); }
-  .st-running { color: var(--green); border-color: var(--green); }
+  .badge { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--panel2); }
+  .st-sleeping { color: var(--gray); background: var(--gray-bg); border-color: transparent; }
+  .st-starting, .st-installing { color: var(--amber); background: var(--amber-bg); border-color: transparent; }
+  .st-running { color: var(--green); background: var(--green-bg); border-color: transparent; }
   .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; color: var(--muted); font-size: 12.5px; }
   .rows b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .url { font-size: 11.5px; color: var(--muted); background: var(--panel2); border-radius: 6px; padding: 4px 8px; word-break: break-all; user-select: all; }
   .err { color: var(--red); font-size: 12px; word-break: break-all; }
   .actions { display: flex; gap: 8px; margin-top: 2px; }
   button {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    background: #fff; color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 5px 14px; font-size: 12.5px; cursor: pointer;
   }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  button:disabled { opacity: .35; cursor: not-allowed; }
-  button.primary { background: #1c3a63; border-color: #2f5a9e; color: #cfe2ff; }
-  section.config { margin-top: 34px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #1d4fd7; color: #fff; }
+  button.danger { color: var(--red); }
+  button.danger:hover:not(:disabled) { border-color: var(--red); }
+
+  /* 表单式添加 MCP */
+  section.add-svc { margin-top: 34px; }
+  section.add-svc h2 { font-size: 15px; margin: 0 0 10px; }
+  .form-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; box-shadow: var(--shadow); }
+  .type-switch { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }
+  .type-btn { padding: 6px 16px; border-radius: 999px; font-size: 13px; }
+  .type-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  .form-grid .wide { grid-column: 1 / -1; }
+  .field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+  .field label .req { color: var(--red); }
+  .field input[type=text], .field input[type=number], .field select, .field textarea {
+    width: 100%; background: #fff; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit;
+  }
+  .field textarea { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; min-height: 64px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid #bcd3f8; border-color: var(--accent); }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .form-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  .form-msg { font-size: 12.5px; }
+  .form-msg.ok { color: var(--green); }
+  .form-msg.bad { color: var(--red); }
+
+  section.config { margin-top: 22px; }
   section.config h2 { font-size: 15px; margin: 0 0 10px; }
-  textarea {
-    width: 100%; min-height: 380px; background: #0b101c; color: #c7d5f0;
+  textarea#cfg-text {
+    width: 100%; min-height: 380px; background: #fff; color: #243247;
     border: 1px solid var(--line); border-radius: 10px; padding: 12px;
     font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; line-height: 1.55; resize: vertical;
   }
@@ -68,6 +96,7 @@
   .cfg-msg.bad { color: var(--red); }
   footer { margin-top: 40px; color: var(--muted); font-size: 12px; line-height: 1.9; }
   footer code { background: var(--panel2); border-radius: 5px; padding: 1px 7px; user-select: all; }
+  @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -94,8 +123,93 @@
   </div>
   <div class="grid" id="services"></div>
 
+  <!-- 路径一：表单式添加 -->
+  <section class="add-svc">
+    <h2>添加 MCP 服务（表单模式）</h2>
+    <div class="form-panel">
+      <div class="field">
+        <label>服务名称 <span class="req">*</span></label>
+        <input type="text" id="f-name" placeholder="例如 my-search（字母 / 数字 / - / _）" style="max-width:320px">
+      </div>
+      <div class="type-switch" id="type-switch">
+        <button type="button" class="type-btn active" data-type="npm">npm 包</button>
+        <button type="button" class="type-btn" data-type="cmd">命令（uvx / Python / 二进制）</button>
+        <button type="button" class="type-btn" data-type="remote">远程 HTTP MCP</button>
+      </div>
+
+      <div class="form-grid">
+        <!-- npm 类型字段 -->
+        <div class="field" data-for="npm">
+          <label>包名 <span class="req">*</span></label>
+          <input type="text" id="f-package" placeholder="@scope/pkg-name 或 pkg-name@1.2.3">
+          <div class="hint">支持版本锁定；启动时自动安装并解析入口</div>
+        </div>
+        <div class="field" data-for="npm">
+          <label>binName（可选）</label>
+          <input type="text" id="f-bin" placeholder="包有多个 bin 入口时必填">
+        </div>
+        <div class="field wide" data-for="npm">
+          <label>nodeArgs（可选，传给 Node 运行时，每行一个）</label>
+          <textarea id="f-nodeargs" placeholder="--require ./proxy-bootstrap.cjs"></textarea>
+        </div>
+
+        <!-- 命令类型字段 -->
+        <div class="field wide" data-for="cmd">
+          <label>命令 <span class="req">*</span></label>
+          <input type="text" id="f-command" placeholder="uvx / uv run / python / 可执行文件路径">
+        </div>
+
+        <!-- 远程类型字段 -->
+        <div class="field wide" data-for="remote">
+          <label>服务 URL <span class="req">*</span></label>
+          <input type="text" id="f-url" placeholder="https://mcp.example.com/mcp">
+        </div>
+        <div class="field" data-for="remote">
+          <label>传输协议</label>
+          <select id="f-transport">
+            <option value="auto">自动（优先 Streamable HTTP，回退 SSE）</option>
+            <option value="http">仅 Streamable HTTP</option>
+            <option value="sse">仅旧式 SSE</option>
+          </select>
+        </div>
+        <div class="field wide" data-for="remote">
+          <label>请求头（可选，每行 KEY=VALUE）</label>
+          <textarea id="f-headers" placeholder="Authorization=Bearer ${MCP_TOKEN}"></textarea>
+          <div class="hint">支持 ${ENV_VAR} 环境变量插值</div>
+        </div>
+
+        <!-- npm 与命令类型共用 -->
+        <div class="field wide" data-for="npm cmd">
+          <label>args（可选，传给 MCP 服务本身，每行一个）</label>
+          <textarea id="f-args" placeholder="--preset&#10;calendar"></textarea>
+        </div>
+        <div class="field wide" data-for="npm cmd">
+          <label>env（可选，每行 KEY=VALUE）</label>
+          <textarea id="f-env" placeholder="API_KEY=${MY_API_KEY}"></textarea>
+        </div>
+
+        <!-- 通用字段 -->
+        <div class="field">
+          <label>空闲回收（分钟，留空用全局默认）</label>
+          <input type="number" id="f-idle" min="1" placeholder="如 15">
+        </div>
+        <div class="field">
+          <label>启用状态</label>
+          <label class="chk"><input type="checkbox" id="f-enabled" checked> 加入统一聚合端点</label>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="primary" id="btn-add">添加并热应用</button>
+        <button id="btn-form-clear">清空表单</button>
+        <span class="form-msg" id="add-msg"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 路径二：JSON 编辑器 -->
   <section class="config">
-    <h2>配置编辑器（保存后热应用，写盘前自动备份 .bak）</h2>
+    <h2>配置编辑器（JSON 模式，保存后热应用，写盘前自动备份 .bak）</h2>
     <textarea id="cfg-text" spellcheck="false" placeholder="加载中…"></textarea>
     <div class="cfg-actions">
       <button class="primary" id="btn-save">保存并热应用</button>
@@ -103,8 +217,8 @@
       <span class="cfg-msg" id="cfg-msg"></span>
     </div>
     <p class="sub" style="color:var(--muted);font-size:12px;margin-top:8px">
-      提示：配置中包含 API 密钥等敏感信息（仅本机同源可访问）。支持 npm 包（package）、任意命令（command，如 uvx）、远程 HTTP MCP（url + headers）三种模式；
-      修改 port 需重启网关生效，服务增删改即时生效。
+      两条配置路径共享同一份 config.json：表单添加后会同步写入上方编辑器供检查；也可直接在此手写任意字段。
+      配置含 API 密钥等敏感信息（仅本机同源可访问）。修改 port 需重启网关生效，服务增删改即时生效。
     </p>
   </section>
 
@@ -121,6 +235,7 @@
   'use strict';
   var MODE_NAMES = { npm: 'npm 包', stdio: 'stdio', remote: '远程 HTTP' };
   var $ = function (id) { return document.getElementById(id); };
+  var addType = 'npm';
 
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -148,6 +263,7 @@
     });
   }
 
+  /* ── 监控 ─────────────────────────────────────────── */
   function statusBadge(s) {
     var names = { sleeping: '休眠', starting: '启动中', installing: '安装中', running: '运行中' };
     return '<span class="badge st-' + escapeHtml(s) + '">' + (names[s] || escapeHtml(s)) + '</span>';
@@ -155,10 +271,8 @@
 
   function renderService(key, v) {
     var cardClass = 'card' + (v.error ? ' has-error' : '') + (v.enabled ? '' : ' disabled-service');
-    var url = v.mode === 'remote'
-      ? escapeHtml(v.remoteUrl)
-      : escapeHtml(v.sseUrl);
-    var modeBadge = '<span class="badge mode">' + (MODE_NAMES[v.mode] || escapeHtml(v.mode)) + '</span>'
+    var url = v.mode === 'remote' ? escapeHtml(v.remoteUrl) : escapeHtml(v.sseUrl);
+    var modeBadge = '<span class="badge">' + (MODE_NAMES[v.mode] || escapeHtml(v.mode)) + '</span>'
       + (v.enabled ? '' : ' <span class="badge">已禁用</span>');
     var errRow = v.error ? '<div class="err">⚠ ' + escapeHtml(v.error) + '</div>' : '';
     var wakeDisabled = (v.status === 'running' || v.status === 'starting' || v.status === 'installing');
@@ -178,6 +292,8 @@
       + '<div class="actions">'
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'wake\')"' + (wakeDisabled ? ' disabled' : '') + '>立即唤醒</button>'
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'sleep\')"' + (sleepDisabled ? ' disabled' : '') + '>立即休眠</button>'
+      + '<span class="spacer" style="flex:1"></span>'
+      + '<button class="danger" onclick="svcRemove(\'' + escapeHtml(key) + '\')">删除</button>'
       + '</div>'
       + '</div>';
   }
@@ -192,7 +308,7 @@
     $('gw-sub').textContent = 'v' + d.gateway.version + ' · ' + d.endpoints.unified_sse;
     var html = '';
     keys.forEach(function (k) { html += renderService(k, d.services[k]); });
-    $('services').innerHTML = html || '<div class="sub">暂无服务，请在下方配置编辑器中添加。</div>';
+    $('services').innerHTML = html || '<div class="sub">暂无服务，可在下方表单或 JSON 编辑器中添加。</div>';
   }
 
   function refresh() {
@@ -210,6 +326,144 @@
       .catch(function (e) { alert(action + ' 失败: ' + e.message); refresh(); });
   };
 
+  // 删除服务：从最新配置中移除并热应用
+  window.svcRemove = function (key) {
+    if (!confirm('确认删除服务 [' + key + ']？将写入配置并立即热应用。')) return;
+    fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+      if (!cfg.services || !cfg.services[key]) throw new Error('服务不存在');
+      delete cfg.services[key];
+      return fetchJSON('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+    }).then(function (res) {
+      setCfgMsg('✓ 已删除并热应用：' + key, true);
+      loadConfig();
+      setTimeout(refresh, 600);
+    }).catch(function (e) {
+      setCfgMsg('删除失败: ' + e.message, false);
+    });
+  };
+
+  /* ── 表单式添加 ───────────────────────────────────── */
+  function setAddMsg(text, ok) {
+    var el = $('add-msg');
+    el.textContent = text;
+    el.className = 'form-msg ' + (ok ? 'ok' : 'bad');
+  }
+
+  function parseLines(t) {
+    return String(t || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  function parseKV(t) {
+    var o = {};
+    parseLines(t).forEach(function (line) {
+      var i = line.indexOf('=');
+      if (i > 0) o[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return o;
+  }
+
+  function setAddType(type) {
+    addType = type;
+    var btns = document.querySelectorAll('.type-btn');
+    btns.forEach(function (b) { b.classList.toggle('active', b.dataset.type === type); });
+    document.querySelectorAll('.field[data-for]').forEach(function (f) {
+      var types = f.dataset.for.split(/\s+/);
+      f.style.display = types.indexOf(type) === -1 ? 'none' : '';
+    });
+  }
+
+  function buildServiceFromForm() {
+    var svc = {};
+    if (addType === 'npm') {
+      svc.package = $('f-package').value.trim();
+    } else if (addType === 'cmd') {
+      svc.command = $('f-command').value.trim();
+    } else {
+      svc.url = $('f-url').value.trim();
+    }
+    if (!$('f-enabled').checked) svc.enabled = false;
+    var idle = parseInt($('f-idle').value, 10);
+    if (!isNaN(idle) && idle > 0) svc.idleTimeoutMinutes = idle;
+
+    if (addType === 'npm') {
+      var bin = $('f-bin').value.trim();
+      if (bin) svc.binName = bin;
+      var na = parseLines($('f-nodeargs').value);
+      if (na.length) svc.nodeArgs = na;
+    }
+    if (addType === 'remote') {
+      var tp = $('f-transport').value;
+      if (tp && tp !== 'auto') svc.transport = tp;
+      var h = parseKV($('f-headers').value);
+      if (Object.keys(h).length) svc.headers = h;
+    }
+    if (addType === 'npm' || addType === 'cmd') {
+      var a = parseLines($('f-args').value);
+      if (a.length) svc.args = a;
+      var e = parseKV($('f-env').value);
+      if (Object.keys(e).length) svc.env = e;
+    }
+    return svc;
+  }
+
+  function validateForm(name, svc) {
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return '服务名称只能包含字母、数字、- 和 _';
+    if (addType === 'npm' && !svc.package) return '请填写 npm 包名';
+    if (addType === 'cmd' && !svc.command) return '请填写启动命令';
+    if (addType === 'remote' && !/^https?:\/\//.test(svc.url)) return '请填写以 http(s):// 开头的服务 URL';
+    return null;
+  }
+
+  function submitAdd() {
+    var name = $('f-name').value.trim();
+    var svc = buildServiceFromForm();
+    var err = validateForm(name, svc);
+    if (err) { setAddMsg(err, false); return; }
+
+    var cfg;
+    try {
+      cfg = JSON.parse($('cfg-text').value);
+    } catch (e) {
+      setAddMsg('JSON 编辑器内容无法解析，请先修正: ' + e.message, false);
+      return;
+    }
+    if (!cfg.services || typeof cfg.services !== 'object') {
+      setAddMsg('当前配置缺少 services 对象', false);
+      return;
+    }
+    if (cfg.services[name]) {
+      setAddMsg('服务 [' + name + '] 已存在，请换一个名称', false);
+      return;
+    }
+    cfg.services[name] = svc;
+    $('cfg-text').value = JSON.stringify(cfg, null, 2);
+
+    fetchJSON('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).then(function (res) {
+      setAddMsg('✓ ' + (res.message || '已添加并热应用'), true);
+      setCfgMsg('✓ 表单添加服务 ' + name, true);
+      setTimeout(refresh, 800);
+    }).catch(function (e) {
+      setAddMsg('保存失败: ' + e.message, false);
+    });
+  }
+
+  function clearForm() {
+    ['f-name', 'f-package', 'f-bin', 'f-nodeargs', 'f-command', 'f-url', 'f-headers', 'f-args', 'f-env', 'f-idle']
+      .forEach(function (id) { $(id).value = ''; });
+    $('f-transport').value = 'auto';
+    $('f-enabled').checked = true;
+    setAddMsg('', true);
+  }
+
+  /* ── JSON 编辑器 ──────────────────────────────────── */
   function setCfgMsg(text, ok) {
     var el = $('cfg-msg');
     el.textContent = text;
@@ -243,9 +497,16 @@
     });
   }
 
+  /* ── 事件绑定与轮询 ───────────────────────────────── */
   $('btn-refresh').addEventListener('click', refresh);
   $('btn-save').addEventListener('click', saveConfig);
   $('btn-reload').addEventListener('click', loadConfig);
+  $('btn-add').addEventListener('click', submitAdd);
+  $('btn-form-clear').addEventListener('click', clearForm);
+  document.querySelectorAll('.type-btn').forEach(function (b) {
+    b.addEventListener('click', function () { setAddType(b.dataset.type); });
+  });
+  setAddType('npm');
 
   setInterval(function () {
     if ($('auto-refresh').checked && document.visibilityState === 'visible') refresh();

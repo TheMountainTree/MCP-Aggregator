@@ -43,6 +43,8 @@ const realConfigPath = path.join(ROOT, 'config.json');
 const realConfigBefore = fs.existsSync(realConfigPath)
   ? fs.readFileSync(realConfigPath, 'utf8')
   : null;
+// 清掉历史测试缓存，确保本轮真实走一遍「连接 → 采集 → 缓存 → 休眠」全链路
+fs.rmSync(path.join(ROOT, 'cache', 'test-remote-tools.json'), { force: true });
 fs.writeFileSync(tmpConfigPath, JSON.stringify({
   port: GW_PORT,
   defaultIdleTimeoutMinutes: 60,
@@ -170,7 +172,8 @@ try {
   {
     const html = await fetch(GW + '/').then(r => r.text());
     ok(html.includes('MCP-Aggregator 控制台'), 'GET / 返回控制台 HTML');
-    ok(html.includes('/api/status') && html.includes('保存并热应用'), '页面包含监控与配置编辑器逻辑');
+    ok(html.includes('/api/status') && html.includes('保存并热应用'), '页面包含监控与 JSON 配置编辑器逻辑');
+    ok(html.includes('添加 MCP 服务') && html.includes('data-type="remote"'), '页面包含表单式添加（npm/命令/远程三种类型）');
   }
 
   console.log('=== 8. 隔离性：真实 config.json 未被测试改写 ===');
