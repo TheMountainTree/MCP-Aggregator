@@ -226,8 +226,9 @@
   </section>
 
   <footer>
-    统一聚合端点（给 AI 客户端用）：<code>http://127.0.0.1:3300/sse</code> ｜ 状态 JSON：<code>/api/status</code> ｜
-    分立服务端点：<code>/:service/sse</code><br>
+    统一聚合端点（给 AI 客户端用）：老式 SSE <code>http://127.0.0.1:3300/sse</code> ｜ Streamable HTTP <code>http://127.0.0.1:3300/mcp</code> ｜
+    状态 JSON：<code>/api/status</code><br>
+    分立服务端点：SSE <code>/:service/sse</code> ｜ Streamable HTTP <code>/:service/mcp</code><br>
     MCP-Aggregator · Scale-to-Zero Aggregation Gateway
   </footer>
 </div>
@@ -274,7 +275,12 @@
 
   function renderService(key, v) {
     var cardClass = 'card' + (v.error ? ' has-error' : '') + (v.enabled ? '' : ' disabled-service');
-    var url = v.mode === 'remote' ? escapeHtml(v.remoteUrl) : escapeHtml(v.sseUrl);
+    var urlChips = '';
+    if (v.mode === 'remote' && v.remoteUrl) {
+      urlChips += '<div class="url">上游 · ' + escapeHtml(v.remoteUrl) + '</div>';
+    }
+    if (v.sseUrl) urlChips += '<div class="url">SSE · ' + escapeHtml(v.sseUrl) + '</div>';
+    if (v.streamableUrl) urlChips += '<div class="url">HTTP · ' + escapeHtml(v.streamableUrl) + '</div>';
     var modeBadge = '<span class="badge">' + (MODE_NAMES[v.mode] || escapeHtml(v.mode)) + '</span>'
       + (v.enabled ? '' : ' <span class="badge">已禁用</span>');
     var errRow = v.error ? '<div class="err">⚠ ' + escapeHtml(v.error) + '</div>' : '';
@@ -291,7 +297,7 @@
       + '<div>超时回收 <b>' + v.idleTimeoutMinutes + ' 分钟</b></div>'
       + '</div>'
       + errRow
-      + '<div class="url">' + url + '</div>'
+      + urlChips
       + '<div class="actions">'
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'wake\')"' + (wakeDisabled ? ' disabled' : '') + '>立即唤醒</button>'
       + '<button onclick="svcAction(\'' + escapeHtml(key) + '\',\'sleep\')"' + (sleepDisabled ? ' disabled' : '') + '>立即休眠</button>'
@@ -309,7 +315,9 @@
     $('gw-tools').textContent = d.gateway.totalAggregatedTools;
     var keys = Object.keys(d.services);
     $('gw-services').textContent = keys.length;
-    $('gw-sub').textContent = 'v' + d.gateway.version + ' · ' + d.endpoints.unified_sse;
+    var sub = 'v' + d.gateway.version + ' · SSE ' + d.endpoints.unified_sse;
+    if (d.endpoints.unified_streamable) sub += ' ｜ HTTP ' + d.endpoints.unified_streamable;
+    $('gw-sub').textContent = sub;
     var html = '';
     keys.forEach(function (k) { html += renderService(k, d.services[k]); });
     $('services').innerHTML = html || '<div class="sub">暂无服务，可在下方表单或 JSON 编辑器中添加。</div>';

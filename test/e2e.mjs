@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -116,7 +117,36 @@ try {
     await client.close();
   }
 
-  console.log('=== 4. 管理 API：wake / sleep ===');
+  console.log('=== 4. Streamable HTTP 端点：/mcp（聚合）与 /:service/mcp（分立） ===');
+  {
+    const transport = new StreamableHTTPClientTransport(new URL(GW + '/mcp'));
+    const client = new Client({ name: 'e2e-test', version: '1.0.0' }, { capabilities: {} });
+    await client.connect(transport);
+    const listed = await client.listTools();
+    ok(listed.tools.some(t => t.name === 'echo_test'), '聚合 Streamable 端点 tools/list 包含远程工具');
+    const res = await client.callTool({ name: 'echo_test', arguments: { text: 'streamable' } });
+    const text = (res.content || []).map(c => c.text || '').join('');
+    ok(text.includes('echo: streamable'), '聚合 Streamable 端点 tools/call 路由正常', 'got: ' + text);
+    await client.close();
+  }
+  {
+    const transport = new StreamableHTTPClientTransport(new URL(GW + '/test-remote/mcp'));
+    const client = new Client({ name: 'e2e-test', version: '1.0.0' }, { capabilities: {} });
+    await client.connect(transport);
+    const listed = await client.listTools();
+    ok(listed.tools.length === 1 && listed.tools[0].name === 'echo_test', '分立 Streamable 端点 tools/list 正常');
+    await client.close();
+  }
+  {
+    const nf = await fetch(GW + '/no-such/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'e2e-test', version: '1.0.0' } } })
+    });
+    ok(nf.status === 404, '未知服务的 Streamable 端点返回 404');
+  }
+
+  console.log('=== 5. 管理 API：wake / sleep ===');
   {
     const wakeRes = await fetch(GW + '/api/services/test-remote/wake', { method: 'POST' });
     ok(wakeRes.ok, 'POST wake 返回 200');
@@ -130,7 +160,7 @@ try {
     ok(nf.status === 404, '未知服务 wake 返回 404');
   }
 
-  console.log('=== 5. 管理 API：config 读取 / 校验 / 热应用 ===');
+  console.log('=== 6. 管理 API：config 读取 / 校验 / 热应用 ===');
   {
     const cfgText = await fetch(GW + '/api/config').then(r => r.text());
     const cfg = JSON.parse(cfgText);
@@ -154,7 +184,7 @@ try {
     ok(fs.existsSync(tmpConfigPath + '.bak'), '写盘前生成 .bak 备份');
   }
 
-  console.log('=== 6. 同源防护：跨域 Origin 访问 /api 被拒 ===');
+  console.log('=== 7. 同源防护：跨域 Origin 访问 /api 被拒 ===');
   {
     const evil = await fetch(GW + '/api/config', {
       method: 'POST',
@@ -168,7 +198,7 @@ try {
     ok(sameOrigin.ok, '同源 Origin 放行');
   }
 
-  console.log('=== 7. 网页控制台 ===');
+  console.log('=== 8. 网页控制台 ===');
   {
     const html = await fetch(GW + '/').then(r => r.text());
     ok(html.includes('MCP-Aggregator 控制台'), 'GET / 返回控制台 HTML');
@@ -177,7 +207,7 @@ try {
     ok(html.includes('svcEdit') && html.includes('取消编辑'), '页面包含服务编辑入口与取消编辑');
   }
 
-  console.log('=== 8. 隔离性：真实 config.json 未被测试改写 ===');
+  console.log('=== 9. 隔离性：真实 config.json 未被测试改写 ===');
   {
     const realNow = fs.existsSync(realConfigPath) ? fs.readFileSync(realConfigPath, 'utf8') : null;
     ok(realNow === realConfigBefore, 'GATEWAY_CONFIG 隔离生效，热保存未触碰真实 config.json');

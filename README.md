@@ -1,7 +1,7 @@
 # MCP-Aggregator
 
 > **High-Performance Scale-to-Zero MCP Aggregation Gateway for Windows, macOS & Linux.**  
-> 将多个分立的 MCP 服务无缝聚合为一个统一的 SSE 端点，提供基于智能路由的按需秒级唤醒与超时自动卸载（Scale-to-Zero）。
+> 将多个分立的 MCP 服务无缝聚合为统一的 SSE 与 Streamable HTTP 端点，提供基于智能路由的按需秒级唤醒与超时自动卸载（Scale-to-Zero）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -11,11 +11,11 @@
 
 ## 🌟 核心特性 (Features)
 
-1. **统一单端点聚合 (Unified SSE Endpoint)**：
-   - 对所有 AI Agent 仅暴露单一统一入口：`http://127.0.0.1:3300/sse`。
+1. **统一单端点聚合 (Unified SSE + Streamable HTTP Endpoint)**：
+   - 对所有 AI Agent 仅暴露单一统一入口：老式 SSE `http://127.0.0.1:3300/sse` 与 **Streamable HTTP `http://127.0.0.1:3300/mcp`** 二选一，协议自动适配客户端。
    - 聚合对象覆盖**全部后端形态**：stdio（npm 包 / uvx / 任意命令）与**远程 HTTP MCP**（Streamable HTTP 优先、旧式 SSE 自动回退）。
    - 自动聚合所有挂载服务的工具定义，智能根据工具名称完成 O(1) 请求路由与转发。
-   - 保持向后兼容：依然保留分立端点 `http://127.0.0.1:3300/:service/sse` 供独立调用。
+   - 保持向后兼容：依然保留分立端点 `http://127.0.0.1:3300/:service/sse` 与 `http://127.0.0.1:3300/:service/mcp` 供独立调用。
 
 2. **真·按需秒级拉起 + 冷态归零 (Scale-to-Zero)**：
    - **冷态 0 MB**：闲时所有后台服务子进程（MS365、Brave 等）**完全不运行**，物理内存占用为 0；远程 HTTP 后端则为空闲断连，不占用对端会话。
@@ -43,15 +43,16 @@
 ## 🏗️ 架构示意 (Architecture)
 
 ```text
-[ Hermes / Claude CLI / AstrBot / Cursor / Continue ]
+[ Hermes / Claude CLI / AstrBot / Cursor / opencode / Continue ]
                        │
-                       │ 统一单入口: GET /sse  &  POST /message
+                       │ 统一单入口: GET /sse & POST /message
+                       │          或: POST /mcp (Streamable HTTP)
                        ▼
 ┌────────────────────────────────────────────────────────┐
 │            MCP-Aggregator Gateway (Express)            │
 │  ├─ 网页控制台: GET /（监控 + 配置热编辑）             │
-│  ├─ 统一聚合端点: GET /sse                             │
-│  ├─ 分立兼容端点: GET /:service/sse                    │
+│  ├─ 统一聚合端点: GET /sse · POST /mcp                 │
+│  ├─ 分立兼容端点: GET /:service/sse · POST /:service/mcp│
 │  ├─ 管理 API: /api/status · /api/config · wake/sleep   │
 │  ├─ Schema 缓存层: cache/<service>-tools.json (<1ms)   │
 │  └─ Scale-to-Zero 状态机 (sleeping / starting / warm)  │
@@ -164,9 +165,26 @@ mcp_servers:
 http://127.0.0.1:3300/sse
 ```
 
-### 4. 单独接入某个分立服务 (Per-Service Endpoint)
+### 4. opencode（仅讲 Streamable HTTP 的客户端）
 
-如果不希望某个客户端接入全量工具，网关为每个后端服务都保留了分立端点 `http://127.0.0.1:3300/:service/sse`，无需改动任何代码，直接将客户端的 URL 指向对应服务即可。例如只接入 ms365：
+opencode v2 的 `remote` 类型会先发 Streamable HTTP 的 POST，遇到纯 SSE 服务器返回的 404 不会自动回退，因此应直接指向 Streamable 端点：
+
+```json
+{
+  "mcp": {
+    "aggregator": {
+      "type": "remote",
+      "url": "http://127.0.0.1:3300/mcp"
+    }
+  }
+}
+```
+
+只接入某个分立服务时，把 URL 换成 `http://127.0.0.1:3300/ms365/mcp` 即可。
+
+### 5. 单独接入某个分立服务 (Per-Service Endpoint)
+
+如果不希望某个客户端接入全量工具，网关为每个后端服务都保留了分立端点——老式 SSE `http://127.0.0.1:3300/:service/sse` 与 Streamable HTTP `http://127.0.0.1:3300/:service/mcp`，无需改动任何代码，直接将客户端的 URL 指向对应服务即可。例如只接入 ms365：
 
 ```json
 {
@@ -234,6 +252,7 @@ http://127.0.0.1:3300/sse
       "stats": { "totalCalls": 4, "wakeups": 1 },
       "error": null,
       "sseUrl": "http://127.0.0.1:3300/ms365/sse",
+      "streamableUrl": "http://127.0.0.1:3300/ms365/mcp",
       "remoteUrl": null
     }
   }

@@ -1,7 +1,7 @@
 {
   "name": "mcp-aggregator",
-  "version": "1.0.0",
-  "description": "High-performance Scale-to-Zero MCP Aggregation Gateway for Windows & macOS. Seamlessly aggregate multiple MCP servers into a unified SSE endpoint with on-demand process waking and auto-shutdown.",
+  "version": "1.1.0",
+  "description": "High-performance Scale-to-Zero MCP Aggregation Gateway for Windows & macOS. Seamlessly aggregate multiple MCP servers into unified SSE + Streamable HTTP endpoints with on-demand process waking and auto-shutdown.",
   "main": "gateway.js",
   "type": "module",
   "scripts": {
@@ -17,7 +17,8 @@
     "ai-agent",
     "hermes",
     "claude",
-    "sse"
+    "sse",
+    "streamable-http"
   ],
   "author": "TheMountainTree",
   "license": "MIT",

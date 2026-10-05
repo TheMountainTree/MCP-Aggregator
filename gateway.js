@@ -3,9 +3,11 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -444,6 +446,90 @@ function findBackendForTool(toolName) {
   return null;
 }
 
+// 构建带标准请求处理器的 MCP Server 实例，供 SSE 与 Streamable HTTP 端点共用。
+// 传入 backend 即为分立单服务模式；传 null 则为聚合模式（按工具名动态路由）。
+function createGatewayServer(backend) {
+  const server = new Server(
+    backend
+      ? { name: `gateway-${backend.key}`, version: '1.0.0' }
+      : { name: 'mcp-aggregator', version: '1.1.0' },
+    { capabilities: { tools: {}, prompts: {}, resources: {} } }
+  );
+
+  if (backend) {
+    // 分立模式：tools/list 优先返回缓存（毫秒级响应、零启动开销）
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      if (backend.cachedTools && backend.cachedTools.length > 0) {
+        return { tools: backend.cachedTools };
+      }
+      const client = await backend.getOrStart();
+      const result = await client.listTools();
+      backend.saveToolsCache(result.tools);
+      return result;
+    });
+
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      backend.stats.totalCalls++;
+      backend.touch();
+      const client = await backend.getOrStart();
+      try {
+        const result = await client.callTool(request.params);
+        backend.touch();
+        return result;
+      } catch (err) {
+        backend.touch();
+        console.error(`[Gateway] 调用 [${backend.key}] 工具 [${request.params.name}] 失败:`, err.message);
+        throw err;
+      }
+    });
+  } else {
+    // 聚合模式：tools/list 聚合所有子服务的 Schema 缓存，tools/call 智能动态路由
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const allTools = [];
+      for (const backend of backends.values()) {
+        if (backend.config.enabled === false) continue;
+        if (backend.cachedTools && backend.cachedTools.length > 0) {
+          allTools.push(...backend.cachedTools);
+        } else {
+          const client = await backend.getOrStart();
+          const result = await client.listTools();
+          backend.saveToolsCache(result.tools);
+          allTools.push(...result.tools);
+        }
+      }
+      return { tools: allTools };
+    });
+
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const toolName = request.params.name;
+      const targetBackend = findBackendForTool(toolName);
+
+      if (!targetBackend) {
+        throw new Error(`未找到提供工具 [${toolName}] 的后台服务，请检查配置或服务是否已就绪。`);
+      }
+
+      targetBackend.stats.totalCalls++;
+      targetBackend.touch();
+      const client = await targetBackend.getOrStart();
+      try {
+        const result = await client.callTool(request.params);
+        targetBackend.touch();
+        return result;
+      } catch (err) {
+        targetBackend.touch();
+        console.error(`[Gateway] 调用 [${targetBackend.key}] 工具 [${toolName}] 失败:`, err.message);
+        throw err;
+      }
+    });
+  }
+
+  // 空实现的 prompts/resources（防止部分客户端报错）
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+
+  return server;
+}
+
 // 4. 构建 Express 服务
 const app = express();
 app.use(cors());
@@ -500,6 +586,7 @@ app.get('/api/status', (req, res) => {
       stats: backend.stats,
       error: backend.lastError || null,
       sseUrl: `http://127.0.0.1:${PORT}/${key}/sse`,
+      streamableUrl: `http://127.0.0.1:${PORT}/${key}/mcp`,
       remoteUrl: backend.isRemoteService ? backend.config.url : null
     };
   }
@@ -508,7 +595,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     gateway: {
       name: 'MCP-Aggregator',
-      version: '1.0.0',
+      version: '1.1.0',
       uptimeSeconds: Math.floor(process.uptime()),
       memoryRSS_MB: (mem.rss / 1024 / 1024).toFixed(1),
       memoryHeapUsed_MB: (mem.heapUsed / 1024 / 1024).toFixed(1),
@@ -516,7 +603,8 @@ app.get('/api/status', (req, res) => {
     },
     endpoints: {
       unified_sse: `http://127.0.0.1:${PORT}/sse`,
-      unified_message: `http://127.0.0.1:${PORT}/message`
+      unified_message: `http://127.0.0.1:${PORT}/message`,
+      unified_streamable: `http://127.0.0.1:${PORT}/mcp`
     },
     services: servicesStatus
   });
@@ -637,53 +725,7 @@ app.get('/sse', async (req, res) => {
   const sessionId = transport.sessionId;
   transports.set(sessionId, transport);
 
-  const server = new Server(
-    { name: 'mcp-aggregator', version: '1.0.0' },
-    { capabilities: { tools: {}, prompts: {}, resources: {} } }
-  );
-
-  // 1. tools/list: 聚合所有子服务的 Schema 缓存，毫秒级响应
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const allTools = [];
-    for (const backend of backends.values()) {
-      if (backend.config.enabled === false) continue;
-      if (backend.cachedTools && backend.cachedTools.length > 0) {
-        allTools.push(...backend.cachedTools);
-      } else {
-        const client = await backend.getOrStart();
-        const result = await client.listTools();
-        backend.saveToolsCache(result.tools);
-        allTools.push(...result.tools);
-      }
-    }
-    return { tools: allTools };
-  });
-
-  // 2. tools/call: 智能动态路由到提供该工具的目标后台进程
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const toolName = request.params.name;
-    const targetBackend = findBackendForTool(toolName);
-
-    if (!targetBackend) {
-      throw new Error(`未找到提供工具 [${toolName}] 的后台服务，请检查配置或服务是否已就绪。`);
-    }
-
-    targetBackend.stats.totalCalls++;
-    targetBackend.touch();
-    const client = await targetBackend.getOrStart();
-    try {
-      const result = await client.callTool(request.params);
-      targetBackend.touch();
-      return result;
-    } catch (err) {
-      targetBackend.touch();
-      console.error(`[Gateway] 调用 [${targetBackend.key}] 工具 [${toolName}] 失败:`, err.message);
-      throw err;
-    }
-  });
-
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+  const server = createGatewayServer(null);
 
   req.on('close', () => {
     transports.delete(sessionId);
@@ -709,41 +751,7 @@ app.get('/:service/sse', async (req, res) => {
   const sessionId = transport.sessionId;
   transports.set(sessionId, transport);
 
-  const server = new Server(
-    { name: `gateway-${serviceKey}`, version: '1.0.0' },
-    { capabilities: { tools: {}, prompts: {}, resources: {} } }
-  );
-
-  // 1. tools/list：优先返回缓存，毫秒级响应，零启动开销！
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    if (backend.cachedTools && backend.cachedTools.length > 0) {
-      return { tools: backend.cachedTools };
-    }
-    const client = await backend.getOrStart();
-    const result = await client.listTools();
-    backend.saveToolsCache(result.tools);
-    return result;
-  });
-
-  // 2. tools/call：按需唤醒 + 转发 + 重置空闲倒计时
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    backend.stats.totalCalls++;
-    backend.touch();
-    const client = await backend.getOrStart();
-    try {
-      const result = await client.callTool(request.params);
-      backend.touch();
-      return result;
-    } catch (err) {
-      backend.touch();
-      console.error(`[Gateway] 调用 [${serviceKey}] 工具 [${request.params.name}] 失败:`, err.message);
-      throw err;
-    }
-  });
-
-  // 空实现的 prompts/resources（防止部分客户端报错）
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+  const server = createGatewayServer(backend);
 
   req.on('close', () => {
     transports.delete(sessionId);
@@ -771,15 +779,123 @@ const handlePostMessage = async (req, res) => {
 app.post('/message', handlePostMessage);
 app.post('/:service/message', handlePostMessage);
 
+// ══════════════════════════════════════════════════════════════════════════════
+// D. Streamable HTTP 端点（2025-03-26 协议）：/mcp（聚合）与 /:service/mcp（分立）
+//    面向仅讲 Streamable HTTP 的客户端（如 opencode v2、部分新 Agent）；
+//    JSON 响应模式，避免经代理时被 SSE 流缓冲坑；老式 SSE 端点保持原样。
+// ══════════════════════════════════════════════════════════════════════════════
+const mcpStreamableSessions = new Map(); // sessionId -> { server, transport, scope: 'aggregate' | serviceKey }
+
+const mcpStreamable = express.Router();
+mcpStreamable.use(express.json({ limit: '2mb' }));
+
+// 处理 POST：带 Mcp-Session-Id 则复用既有会话；否则视为 initialize 并创建新会话
+async function handleStreamablePost(req, res, backend, scope) {
+  const sessionId = req.headers['mcp-session-id'];
+  if (sessionId) {
+    const entry = mcpStreamableSessions.get(sessionId);
+    if (!entry || entry.scope !== scope) {
+      return res.status(404).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Session not found' },
+        id: null
+      });
+    }
+    return await entry.transport.handleRequest(req, res, req.body);
+  }
+
+  // 新会话：仅 initialize 允许建会话，其余请求直接拒绝
+  if (req.body?.method !== 'initialize') {
+    return res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Bad Request: Mcp-Session-Id header is required' },
+      id: req.body?.id ?? null
+    });
+  }
+
+  const server = createGatewayServer(backend);
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableJsonResponse: true,
+    onsessioninitialized: (sid) => {
+      mcpStreamableSessions.set(sid, { server, transport, scope });
+      console.log(`[Gateway] Streamable HTTP 会话已建立 [${scope === 'aggregate' ? '统一聚合' : scope}] (Session: ${sid})`);
+    }
+  });
+  transport.onclose = () => {
+    if (transport.sessionId) {
+      mcpStreamableSessions.delete(transport.sessionId);
+    }
+  };
+
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
+}
+
+// 处理 GET（服务端推送流）与 DELETE（客户端显式结束会话）
+async function handleStreamableOther(req, res, scope) {
+  const sessionId = req.headers['mcp-session-id'];
+  if (!sessionId) {
+    return res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Bad Request: Mcp-Session-Id header is required' },
+      id: null
+    });
+  }
+  const entry = mcpStreamableSessions.get(sessionId);
+  if (!entry || entry.scope !== scope) {
+    return res.status(404).json({
+      jsonrpc: '2.0',
+      error: { code: -32001, message: 'Session not found' },
+      id: null
+    });
+  }
+  await entry.transport.handleRequest(req, res);
+}
+
+// 注意：具体路径 /mcp 必须先于 /:service/mcp 注册，否则会被参数路由吞掉
+mcpStreamable.post('/mcp', (req, res) => handleStreamablePost(req, res, null, 'aggregate'));
+mcpStreamable.get('/mcp', (req, res) => handleStreamableOther(req, res, 'aggregate'));
+mcpStreamable.delete('/mcp', (req, res) => handleStreamableOther(req, res, 'aggregate'));
+
+mcpStreamable.post('/:service/mcp', (req, res) => {
+  const backend = backends.get(req.params.service);
+  if (!backend) {
+    return res.status(404).send(`Unknown MCP service: ${req.params.service}`);
+  }
+  return handleStreamablePost(req, res, backend, req.params.service);
+});
+mcpStreamable.get('/:service/mcp', (req, res) => {
+  if (!backends.has(req.params.service)) {
+    return res.status(404).send(`Unknown MCP service: ${req.params.service}`);
+  }
+  return handleStreamableOther(req, res, req.params.service);
+});
+mcpStreamable.delete('/:service/mcp', (req, res) => {
+  if (!backends.has(req.params.service)) {
+    return res.status(404).send(`Unknown MCP service: ${req.params.service}`);
+  }
+  return handleStreamableOther(req, res, req.params.service);
+});
+
+// JSON 解析失败等错误统一返回 400 JSON，而非 Express 默认的 500 HTML
+mcpStreamable.use((err, req, res, next) => {
+  const status = err?.type === 'entity.parse.failed' ? 400 : 500;
+  res.status(status).json({ error: err?.message || 'Internal error' });
+});
+
+app.use(mcpStreamable);
+
 // 5. 启动网关
 const server = app.listen(PORT, '127.0.0.1', async () => {
   console.log('══════════════════════════════════════════════════════════════');
   console.log(`  MCP-Aggregator 网关已在 http://127.0.0.1:${PORT} 启动`);
   console.log('══════════════════════════════════════════════════════════════');
-  console.log(`  [统一聚合端点] : http://127.0.0.1:${PORT}/sse`);
-  console.log('  [分立服务端点] :');
+  console.log(`  [统一聚合端点] SSE: http://127.0.0.1:${PORT}/sse`);
+  console.log(`                 Streamable HTTP: http://127.0.0.1:${PORT}/mcp`);
+  console.log('  [分立服务端点] (老式 SSE: /:name/sse，Streamable: /:name/mcp):');
   for (const key of backends.keys()) {
-    console.log(`    - ${key.padEnd(14)} : http://127.0.0.1:${PORT}/${key}/sse`);
+    console.log(`    - ${key.padEnd(14)} : http://127.0.0.1:${PORT}/${key}/sse | /${key}/mcp`);
   }
   console.log('──────────────────────────────────────────────────────────────');
   console.log('正在初始化服务依赖并预热工具 Schema 缓存...');
